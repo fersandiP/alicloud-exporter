@@ -1,10 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"sort"
 	"testing"
+	"time"
 )
+
+func init() { backoffBase = time.Millisecond }
 
 func TestParseDatapoints(t *testing.T) {
 	if dps, err := parseDatapoints(""); err != nil || dps != nil {
@@ -62,5 +67,55 @@ func TestRenderDimensions(t *testing.T) {
 	sort.Strings(ids)
 	if len(arr) != 2 || ids[0] != "vpn-a" || ids[1] != "vpn-b" {
 		t.Errorf("got %v, want two objects for vpn-a and vpn-b", arr)
+	}
+}
+
+func TestWithBackoffRetriesThrottling(t *testing.T) {
+	var attempts int
+	out, err := withBackoff(context.Background(), func() { attempts++ }, func() (string, error) {
+		if attempts < 3 {
+			return "", errors.New("Throttling.User: Request was denied due to user flow control")
+		}
+		return "ok", nil
+	})
+	if err != nil || out != "ok" {
+		t.Fatalf("got (%q, %v), want (ok, nil)", out, err)
+	}
+	if attempts != 3 {
+		t.Errorf("attempts = %d, want 3", attempts)
+	}
+}
+
+func TestWithBackoffGivesUp(t *testing.T) {
+	var attempts int
+	_, err := withBackoff(context.Background(), func() { attempts++ }, func() (string, error) {
+		return "", errors.New("Throttling.User")
+	})
+	if err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+	if attempts != 5 {
+		t.Errorf("attempts = %d, want 5", attempts)
+	}
+}
+
+func TestWithBackoffDoesNotRetryOtherErrors(t *testing.T) {
+	var attempts int
+	_, err := withBackoff(context.Background(), func() { attempts++ }, func() (string, error) {
+		return "", errors.New("InvalidParameter")
+	})
+	if err == nil || attempts != 1 {
+		t.Errorf("got (err=%v, attempts=%d), want (non-nil, 1)", err, attempts)
+	}
+}
+
+func TestWithBackoffHonoursContextCancel(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	_, err := withBackoff(ctx, nil, func() (string, error) {
+		return "", errors.New("Throttling.User")
+	})
+	if err == nil {
+		t.Fatal("expected context error")
 	}
 }
