@@ -271,14 +271,18 @@ func NewCollector(cfg *Config, lister metricLister, reg prometheus.Registerer) *
 
 func (c *Collector) pollOnce(ctx context.Context) {
 	start := time.Now()
+	failed := 0
 	for _, s := range c.cfg.Metrics {
 		if err := c.pollSpec(ctx, s); err != nil {
 			log.Printf("poll %s: %v", specLabel(s), err)
 			c.pollErrors.WithLabelValues(specLabel(s)).Inc()
+			failed++
 		}
 	}
 	c.lastDuration.Set(time.Since(start).Seconds())
-	c.lastSuccess.SetToCurrentTime()
+	if failed == 0 {
+		c.lastSuccess.SetToCurrentTime()
+	}
 }
 
 func (c *Collector) pollSpec(ctx context.Context, s MetricSpec) error {

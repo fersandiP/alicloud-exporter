@@ -222,3 +222,27 @@ func TestPollOnceCountsAPICalls(t *testing.T) {
 		t.Errorf("cms_api_calls_total = %v, want 1", got)
 	}
 }
+
+func TestPollOnceDoesNotAdvanceSuccessWhenSpecFails(t *testing.T) {
+	spec := MetricSpec{Namespace: "acs_vpn", MetricName: "tun.state", Period: 60, Statistic: "Average", Dimensions: []string{"instanceId"}}
+	f := &fakeLister{errs: map[string]error{"tun.state": errors.New("InternalError")}}
+	reg := prometheus.NewRegistry()
+	c := NewCollector(testConfig(spec), f, reg)
+	c.pollOnce(context.Background())
+
+	if got := testutil.ToFloat64(c.lastSuccess); got != 0 {
+		t.Errorf("last_poll_success_timestamp_seconds = %v, want 0 (every spec errored)", got)
+	}
+}
+
+func TestPollOnceAdvancesSuccessOnCleanCycle(t *testing.T) {
+	spec := MetricSpec{Namespace: "acs_vpn", MetricName: "ipsec.state", Period: 60, Statistic: "Average", Dimensions: []string{"instanceId"}}
+	f := &fakeLister{responses: map[string]string{"ipsec.state": `[{"timestamp":1,"instanceId":"vpn-a","Average":1}]`}}
+	reg := prometheus.NewRegistry()
+	c := NewCollector(testConfig(spec), f, reg)
+	c.pollOnce(context.Background())
+
+	if got := testutil.ToFloat64(c.lastSuccess); got <= 0 {
+		t.Errorf("last_poll_success_timestamp_seconds = %v, want > 0 (clean cycle)", got)
+	}
+}
