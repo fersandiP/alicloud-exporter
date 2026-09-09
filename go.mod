@@ -1,4 +1,4 @@
-module github.com/amartha/alicloud-exporter
+module github.com/fersandiP/alicloud-exporter
 
 go 1.27.1
 
