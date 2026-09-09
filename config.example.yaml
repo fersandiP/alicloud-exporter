@@ -1,0 +1,25 @@
+# alicloud-exporter example configuration.
+# Copy to config.yaml (or mount as a ConfigMap at /etc/alicloud-exporter/config.yaml)
+# and edit region_id + the resource IDs under dimension_select.
+
+region_id: ap-southeast-5      # required — the region the resources live in
+poll_interval: 60s             # how often the exporter calls CMS (its own timer, not the scrape interval)
+listen_addr: ":9525"
+metrics_path: "/metrics"
+
+# One entry per (namespace, metric) pair. `dimensions` lists which returned
+# dimension keys become Prometheus labels; `dimension_select` filters to specific
+# values and batches them into a single API call.
+metrics:
+  - {namespace: acs_vpn, metric_name: ipsec.state,        dimensions: [instanceId], dimension_select: {instanceId: ["vpn-k1a3of5816kmbsn70whwk"]}}
+  - {namespace: acs_vpn, metric_name: ipsec.bgp_state,    dimensions: [instanceId], dimension_select: {instanceId: ["vpn-k1a3of5816kmbsn70whwk"]}}
+  - {namespace: acs_vpn, metric_name: tun.state,          dimensions: [instanceId, tunnelId], dimension_select: {instanceId: ["vpn-k1a3of5816kmbsn70whwk"]}}
+  - {namespace: acs_vpn, metric_name: tun.bgp_state,      dimensions: [instanceId, tunnelId], dimension_select: {instanceId: ["vpn-k1a3of5816kmbsn70whwk"]}}
+  - {namespace: acs_vpn, metric_name: ipsec_rx.rate,      dimensions: [instanceId], dimension_select: {instanceId: ["vpn-k1a3of5816kmbsn70whwk"]}}
+  - {namespace: acs_vpn, metric_name: ipsec_tx.rate,      dimensions: [instanceId], dimension_select: {instanceId: ["vpn-k1a3of5816kmbsn70whwk"]}}
+  - {namespace: acs_vpn, metric_name: tun.rx_bps,         dimensions: [instanceId, tunnelId], dimension_select: {instanceId: ["vpn-k1a3of5816kmbsn70whwk"]}}
+  - {namespace: acs_vpn, metric_name: tun.tx_bps,         dimensions: [instanceId, tunnelId], dimension_select: {instanceId: ["vpn-k1a3of5816kmbsn70whwk"]}}
+  - {namespace: acs_vpn, metric_name: net_rx.rate,        dimensions: [instanceId], dimension_select: {instanceId: ["vpn-k1a3of5816kmbsn70whwk"]}}
+  - {namespace: acs_vpn, metric_name: net_tx.rate,        dimensions: [instanceId], dimension_select: {instanceId: ["vpn-k1a3of5816kmbsn70whwk"]}}
+  - {namespace: acs_vpn, metric_name: in_bandwidth_utilization,  dimensions: [instanceId], dimension_select: {instanceId: ["vpn-k1a3of5816kmbsn70whwk"]}}
+  - {namespace: acs_vpn, metric_name: out_bandwidth_utilization, dimensions: [instanceId], dimension_select: {instanceId: ["vpn-k1a3of5816kmbsn70whwk"]}}
