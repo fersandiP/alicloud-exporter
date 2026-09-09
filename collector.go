@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/rand"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -84,8 +85,14 @@ func renderDimensions(sel map[string][]string) string {
 	if len(sel) == 0 {
 		return ""
 	}
+	keys := make([]string, 0, len(sel))
+	for k := range sel {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 	combos := []map[string]string{{}}
-	for k, vals := range sel {
+	for _, k := range keys {
+		vals := sel[k]
 		var next []map[string]string
 		for _, c := range combos {
 			for _, v := range vals {
@@ -180,7 +187,9 @@ type sdkLister struct {
 // credentials provider chain (env AK/SK -> RRSA OIDC -> CLI/profile -> ECS RAM
 // role), so this works both locally and in-cluster with RRSA.
 func newSDKLister(regionID string) (metricLister, error) {
-	client, err := cms.NewClientWithOptions(regionID, sdk.NewConfig(), nil)
+	sdkCfg := sdk.NewConfig()
+	sdkCfg.Scheme = "HTTPS"
+	client, err := cms.NewClientWithOptions(regionID, sdkCfg, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create cms client: %w", err)
 	}
@@ -194,6 +203,7 @@ func (l *sdkLister) List(_ context.Context, req listRequest) (string, error) {
 	r.Period = req.Period
 	r.StartTime = req.StartTime
 	r.EndTime = req.EndTime
+	r.Length = "1000"
 	if req.Dimensions != "" {
 		r.Dimensions = req.Dimensions
 	}
@@ -203,6 +213,9 @@ func (l *sdkLister) List(_ context.Context, req listRequest) (string, error) {
 	}
 	if resp.Code != "" && resp.Code != "200" {
 		return "", fmt.Errorf("cms DescribeMetricList code=%s message=%s", resp.Code, resp.Message)
+	}
+	if resp.NextToken != "" {
+		log.Printf("cms DescribeMetricList %s/%s: results truncated (NextToken set); reduce dimension_select batch size", req.Namespace, req.MetricName)
 	}
 	return resp.Datapoints, nil
 }

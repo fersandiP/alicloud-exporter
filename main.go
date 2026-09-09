@@ -33,9 +33,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	col.pollOnce(ctx) // prime the cache before serving
-
 	go func() {
+		col.pollOnce(ctx) // prime the cache
 		t := time.NewTicker(cfg.PollInterval)
 		defer t.Stop()
 		for {
@@ -56,15 +55,20 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	idle := make(chan struct{})
 	go func() {
 		<-ctx.Done()
 		shCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(shCtx)
+		if err := srv.Shutdown(shCtx); err != nil {
+			log.Printf("http shutdown: %v", err)
+		}
+		close(idle)
 	}()
 
 	log.Printf("alicloud-exporter %s listening on %s%s (poll every %s)", version, cfg.ListenAddr, cfg.MetricsPath, cfg.PollInterval)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("http server: %v", err)
 	}
+	<-idle
 }
