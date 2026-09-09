@@ -117,6 +117,12 @@ region_id: ap-southeast-5
 metrics:
   - {namespace: acs_vpn, metric_name: "tun state"}
 `,
+		"metrics_path without leading slash": `
+region_id: ap-southeast-5
+metrics_path: metrics
+metrics:
+  - {namespace: acs_vpn, metric_name: x}
+`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -124,5 +130,22 @@ metrics:
 				t.Fatalf("expected error for %s, got nil", name)
 			}
 		})
+	}
+}
+
+// TestLoadRejectsInvalidDimensionLabel guards against a dimension key that is not
+// a valid Prometheus label name (here it contains a "."). Load must return an
+// error rather than let prometheus.NewGaugeVec / MustRegister panic at startup.
+func TestLoadRejectsInvalidDimensionLabel(t *testing.T) {
+	p := writeTempConfig(t, `
+region_id: ap-southeast-5
+metrics:
+  - namespace: acs_vpn
+    metric_name: tun.bgp_state
+    dimensions: ["instance.id"]
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected error for dimension key containing \".\", got nil")
 	}
 }
