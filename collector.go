@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"math/rand"
+	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +18,10 @@ import (
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/cms"
 	"github.com/prometheus/client_golang/prometheus"
 )
+
+// version is the exporter build version. Task 5's main package overrides it via
+// -ldflags "-X main.version=..."; it is declared here so tests compile.
+var version = "dev"
 
 type datapoint map[string]any
 
@@ -198,4 +205,113 @@ func (l *sdkLister) List(_ context.Context, req listRequest) (string, error) {
 		return "", fmt.Errorf("cms DescribeMetricList code=%s message=%s", resp.Code, resp.Message)
 	}
 	return resp.Datapoints, nil
+}
+
+type Collector struct {
+	cfg    *Config
+	lister metricLister
+
+	gauges map[string]*prometheus.GaugeVec // key: spec.FinalName()
+
+	apiCalls     prometheus.Counter
+	apiCallQuota prometheus.Gauge
+	pollErrors   *prometheus.CounterVec
+	lastSuccess  prometheus.Gauge
+	lastDuration prometheus.Gauge
+	buildInfo    *prometheus.GaugeVec
+}
+
+func specLabel(s MetricSpec) string { return s.Namespace + "/" + s.MetricName }
+
+func NewCollector(cfg *Config, lister metricLister, reg prometheus.Registerer) *Collector {
+	c := &Collector{
+		cfg:    cfg,
+		lister: lister,
+		gauges: make(map[string]*prometheus.GaugeVec, len(cfg.Metrics)),
+		apiCalls: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "alicloud_exporter_cms_api_calls_total",
+			Help: "Total CMS DescribeMetricList HTTP attempts, including retries.",
+		}),
+		apiCallQuota: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "alicloud_exporter_cms_api_call_quota",
+			Help: "Documented monthly combined free quota for CMS query API calls.",
+		}),
+		pollErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "alicloud_exporter_poll_errors_total",
+			Help: "Per-spec poll or datapoint-parse failures.",
+		}, []string{"spec"}),
+		lastSuccess: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "alicloud_exporter_last_poll_success_timestamp_seconds",
+			Help: "Unix time of the last completed poll cycle.",
+		}),
+		lastDuration: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "alicloud_exporter_last_poll_duration_seconds",
+			Help: "Wall-clock duration of the last poll cycle.",
+		}),
+		buildInfo: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "alicloud_exporter_build_info",
+			Help: "Build metadata; constant 1.",
+		}, []string{"version", "goversion"}),
+	}
+	c.apiCallQuota.Set(1_000_000)
+	c.buildInfo.WithLabelValues(version, runtime.Version()).Set(1)
+
+	reg.MustRegister(c.apiCalls, c.apiCallQuota, c.pollErrors, c.lastSuccess, c.lastDuration, c.buildInfo)
+
+	for _, s := range cfg.Metrics {
+		g := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: s.FinalName(),
+			Help: fmt.Sprintf("CMS metric %s/%s", s.Namespace, s.MetricName),
+		}, s.Dimensions)
+		reg.MustRegister(g)
+		c.gauges[s.FinalName()] = g
+	}
+	return c
+}
+
+func (c *Collector) pollOnce(ctx context.Context) {
+	start := time.Now()
+	for _, s := range c.cfg.Metrics {
+		if err := c.pollSpec(ctx, s); err != nil {
+			log.Printf("poll %s: %v", specLabel(s), err)
+			c.pollErrors.WithLabelValues(specLabel(s)).Inc()
+		}
+	}
+	c.lastDuration.Set(time.Since(start).Seconds())
+	c.lastSuccess.SetToCurrentTime()
+}
+
+func (c *Collector) pollSpec(ctx context.Context, s MetricSpec) error {
+	now := time.Now()
+	period := time.Duration(s.Period) * time.Second
+	req := listRequest{
+		Namespace:  s.Namespace,
+		MetricName: s.MetricName,
+		Period:     strconv.Itoa(s.Period),
+		StartTime:  strconv.FormatInt(now.Add(-2*period).UnixMilli(), 10),
+		EndTime:    strconv.FormatInt(now.UnixMilli(), 10),
+		Dimensions: renderDimensions(s.DimensionSelect),
+	}
+	raw, err := withBackoff(ctx, c.apiCalls.Inc, func() (string, error) {
+		return c.lister.List(ctx, req)
+	})
+	if err != nil {
+		return err // series left intact — no Reset on failure
+	}
+	dps, err := parseDatapoints(raw)
+	if err != nil {
+		return err
+	}
+	g := c.gauges[s.FinalName()]
+	g.Reset()
+	var parseErr error
+	for _, dp := range latestByDimensions(dps, s.Dimensions) {
+		v, ok := dp.statValue(s.Statistic)
+		if !ok {
+			parseErr = fmt.Errorf("datapoint missing statistic %q", s.Statistic)
+			continue
+		}
+		g.With(dp.labels(s.Dimensions)).Set(v)
+	}
+	return parseErr
 }

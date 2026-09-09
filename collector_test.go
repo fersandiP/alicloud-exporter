@@ -5,8 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func init() { backoffBase = time.Millisecond }
@@ -117,5 +121,104 @@ func TestWithBackoffHonoursContextCancel(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected context error")
+	}
+}
+
+type fakeLister struct {
+	// keyed by metric_name -> datapoints JSON to return
+	responses map[string]string
+	errs      map[string]error
+	calls     int
+}
+
+func (f *fakeLister) List(_ context.Context, req listRequest) (string, error) {
+	f.calls++
+	if err := f.errs[req.MetricName]; err != nil {
+		return "", err
+	}
+	return f.responses[req.MetricName], nil
+}
+
+func testConfig(specs ...MetricSpec) *Config {
+	return &Config{RegionID: "r", PollInterval: time.Minute, ListenAddr: ":0", MetricsPath: "/metrics", Metrics: specs}
+}
+
+func TestPollOnceDualTunnelDistinctSeries(t *testing.T) {
+	spec := MetricSpec{
+		Namespace: "acs_vpn", MetricName: "tun.bgp_state", Period: 60, Statistic: "Average",
+		Dimensions: []string{"instanceId", "tunnelId"},
+	}
+	f := &fakeLister{responses: map[string]string{
+		"tun.bgp_state": `[
+			{"timestamp":100,"instanceId":"vpn-a","tunnelId":"1","Average":1},
+			{"timestamp":100,"instanceId":"vpn-a","tunnelId":"2","Average":0}
+		]`,
+	}}
+	reg := prometheus.NewRegistry()
+	c := NewCollector(testConfig(spec), f, reg)
+	c.pollOnce(context.Background())
+
+	want := `
+# HELP aliyun_acs_vpn_tun_bgp_state CMS metric acs_vpn/tun.bgp_state
+# TYPE aliyun_acs_vpn_tun_bgp_state gauge
+aliyun_acs_vpn_tun_bgp_state{instanceId="vpn-a",tunnelId="1"} 1
+aliyun_acs_vpn_tun_bgp_state{instanceId="vpn-a",tunnelId="2"} 0
+`
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(want), "aliyun_acs_vpn_tun_bgp_state"); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestPollOnceIsolatesFailingSpec(t *testing.T) {
+	good := MetricSpec{Namespace: "acs_vpn", MetricName: "ipsec.state", Period: 60, Statistic: "Average", Dimensions: []string{"instanceId"}}
+	bad := MetricSpec{Namespace: "acs_vpn", MetricName: "tun.state", Period: 60, Statistic: "Average", Dimensions: []string{"instanceId"}}
+	f := &fakeLister{
+		responses: map[string]string{"ipsec.state": `[{"timestamp":1,"instanceId":"vpn-a","Average":1}]`},
+		errs:      map[string]error{"tun.state": errors.New("InvalidParameter")},
+	}
+	reg := prometheus.NewRegistry()
+	c := NewCollector(testConfig(good, bad), f, reg)
+	c.pollOnce(context.Background())
+
+	if got := testutil.ToFloat64(c.pollErrors.WithLabelValues("acs_vpn/tun.state")); got != 1 {
+		t.Errorf("poll_errors_total = %v, want 1", got)
+	}
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(`
+# HELP aliyun_acs_vpn_ipsec_state CMS metric acs_vpn/ipsec.state
+# TYPE aliyun_acs_vpn_ipsec_state gauge
+aliyun_acs_vpn_ipsec_state{instanceId="vpn-a"} 1
+`), "aliyun_acs_vpn_ipsec_state"); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestPollOnceKeepsLastGoodOnError(t *testing.T) {
+	spec := MetricSpec{Namespace: "acs_vpn", MetricName: "ipsec.state", Period: 60, Statistic: "Average", Dimensions: []string{"instanceId"}}
+	f := &fakeLister{responses: map[string]string{"ipsec.state": `[{"timestamp":1,"instanceId":"vpn-a","Average":1}]`}}
+	reg := prometheus.NewRegistry()
+	c := NewCollector(testConfig(spec), f, reg)
+	c.pollOnce(context.Background())
+
+	f.responses = nil
+	f.errs = map[string]error{"ipsec.state": errors.New("InternalError")}
+	c.pollOnce(context.Background())
+
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(`
+# HELP aliyun_acs_vpn_ipsec_state CMS metric acs_vpn/ipsec.state
+# TYPE aliyun_acs_vpn_ipsec_state gauge
+aliyun_acs_vpn_ipsec_state{instanceId="vpn-a"} 1
+`), "aliyun_acs_vpn_ipsec_state"); err != nil {
+		t.Errorf("stale series should persist after a failed poll: %v", err)
+	}
+}
+
+func TestPollOnceCountsAPICalls(t *testing.T) {
+	spec := MetricSpec{Namespace: "acs_vpn", MetricName: "ipsec.state", Period: 60, Statistic: "Average"}
+	f := &fakeLister{responses: map[string]string{"ipsec.state": `[]`}}
+	reg := prometheus.NewRegistry()
+	c := NewCollector(testConfig(spec), f, reg)
+	c.pollOnce(context.Background())
+	if got := testutil.ToFloat64(c.apiCalls); got != 1 {
+		t.Errorf("cms_api_calls_total = %v, want 1", got)
 	}
 }
