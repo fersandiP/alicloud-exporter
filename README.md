@@ -5,8 +5,9 @@ Prometheus exporter for Alibaba Cloud Monitor (CMS). Polls the CMS
 Prometheus gauges on `:9525/metrics`, for `vmagent` / Prometheus to scrape and
 `remote_write` into VictoriaMetrics.
 
-Implements "Option A" from
-`concepts/alibaba-cms-victoriametrics-integration-options.md`.
+It calls the CMS query API directly — no ARMS Managed Prometheus or EventBridge
+in the path — which keeps it inside the free CMS API-call quota and adds no
+managed-service dependency between the source and VictoriaMetrics.
 
 ## Run
 
