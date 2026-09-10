@@ -31,9 +31,10 @@ type MetricSpec struct {
 }
 
 var (
-	nameSanitizer  = strings.NewReplacer(".", "_", "-", "_")
-	validName      = regexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]*$`)
-	allowedStats   = map[string]bool{"Average": true, "Maximum": true, "Minimum": true, "Sum": true, "Value": true}
+	nameSanitizer = strings.NewReplacer(".", "_", "-", "_")
+	validName     = regexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]*$`)
+	validLabel    = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+	allowedStats  = map[string]bool{"Average": true, "Maximum": true, "Minimum": true, "Sum": true, "Value": true}
 )
 
 func (s MetricSpec) FinalName() string {
@@ -92,6 +93,9 @@ func (c *Config) validate() error {
 	if c.RegionID == "" {
 		return fmt.Errorf("region_id is required")
 	}
+	if !strings.HasPrefix(c.MetricsPath, "/") {
+		return fmt.Errorf("metrics_path %q must start with \"/\"", c.MetricsPath)
+	}
 	if c.PollInterval <= 0 {
 		return fmt.Errorf("poll_interval must be positive")
 	}
@@ -112,6 +116,12 @@ func (c *Config) validate() error {
 		}
 		dimSet := map[string]bool{}
 		for _, d := range s.Dimensions {
+			if dimSet[d] {
+				return fmt.Errorf("%s: duplicate dimension %q", where, d)
+			}
+			if !validLabel.MatchString(d) {
+				return fmt.Errorf("%s: dimension %q is not a valid Prometheus label name", where, d)
+			}
 			dimSet[d] = true
 		}
 		for k := range s.DimensionSelect {
