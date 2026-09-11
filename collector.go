@@ -8,6 +8,7 @@ import (
 	"log"
 	"math"
 	"math/rand"
+	"os"
 	"runtime"
 	"sort"
 	"strconv"
@@ -15,6 +16,8 @@ import (
 	"time"
 
 	"github.com/aliyun/alibaba-cloud-sdk-go/sdk"
+	"github.com/aliyun/alibaba-cloud-sdk-go/sdk/auth"
+	"github.com/aliyun/alibaba-cloud-sdk-go/sdk/auth/credentials"
 	sdkerrors "github.com/aliyun/alibaba-cloud-sdk-go/sdk/errors"
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/cms"
 	"github.com/prometheus/client_golang/prometheus"
@@ -182,18 +185,83 @@ type sdkLister struct {
 	client *cms.Client
 }
 
+// Variables ACK's pod-identity webhook injects into an RRSA-enabled pod.
+const (
+	envRoleARN      = "ALIBABA_CLOUD_ROLE_ARN"
+	envOIDCProvider = "ALIBABA_CLOUD_OIDC_PROVIDER_ARN"
+	envOIDCTokenFil = "ALIBABA_CLOUD_OIDC_TOKEN_FILE"
+)
+
 // newSDKLister builds a metricLister backed by the Alibaba Cloud Monitor SDK.
-// Passing a nil credential to NewClientWithOptions makes the SDK use its default
-// credentials provider chain (env AK/SK -> RRSA OIDC -> CLI/profile -> ECS RAM
-// role), so this works both locally and in-cluster with RRSA.
+// Without RRSA it passes a nil credential, which selects the SDK's default
+// provider chain (env AK/SK -> CLI/profile -> ECS RAM role) for laptops.
 func newSDKLister(regionID string) (metricLister, error) {
 	sdkCfg := sdk.NewConfig()
 	sdkCfg.Scheme = "HTTPS"
-	client, err := cms.NewClientWithOptions(regionID, sdkCfg, nil)
+
+	cred, err := rrsaCredential()
+	if err != nil {
+		return nil, err
+	}
+
+	client, err := cms.NewClientWithOptions(regionID, sdkCfg, cred)
 	if err != nil {
 		return nil, fmt.Errorf("create cms client: %w", err)
 	}
 	return &sdkLister{client: client}, nil
+}
+
+// rrsaCredential binds the OIDC provider directly when the pod carries RRSA
+// variables, and returns nil otherwise.
+//
+// Going through the default chain instead is unsafe here. It treats a failed
+// AssumeRoleWithOIDC as a reason to try the next provider, so a role that is
+// missing, mistrusted or briefly unavailable downgrades the process to the node's
+// ECS RAM role — which usually has enough access to look alive and not enough to
+// be correct. The chain then pins whichever provider answered first for the life
+// of the process, so the downgrade outlasts its cause and only a restart clears
+// it. Binding one provider turns all of that into a startup error.
+func rrsaCredential() (auth.Credential, error) {
+	roleARN := os.Getenv(envRoleARN)
+	providerARN := os.Getenv(envOIDCProvider)
+	tokenFile := os.Getenv(envOIDCTokenFil)
+
+	if roleARN == "" && providerARN == "" && tokenFile == "" {
+		return nil, nil
+	}
+
+	var missing []string
+	for _, v := range []struct{ name, value string }{
+		{envRoleARN, roleARN},
+		{envOIDCProvider, providerARN},
+		{envOIDCTokenFil, tokenFile},
+	} {
+		if v.value == "" {
+			missing = append(missing, v.name)
+		}
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("RRSA partially configured, missing %s: set all three or none, "+
+			"since a partial set would authenticate as the node instead", strings.Join(missing, ", "))
+	}
+
+	provider, err := credentials.NewOIDCCredentialsProviderBuilder().
+		WithRoleArn(roleARN).
+		WithOIDCProviderARN(providerARN).
+		WithOIDCTokenFilePath(tokenFile).
+		WithRoleSessionName("alicloud-exporter").
+		Build()
+	if err != nil {
+		return nil, fmt.Errorf("build RRSA credentials for %s: %w", roleARN, err)
+	}
+
+	// Assume once here so a bad trust policy is a startup failure with the STS
+	// error attached, rather than a 403 from CMS naming some other principal.
+	if _, err := provider.GetCredentials(); err != nil {
+		return nil, fmt.Errorf("assume %s via RRSA: %w", roleARN, err)
+	}
+	log.Printf("authenticating as %s via RRSA", roleARN)
+	return provider, nil
 }
 
 func (l *sdkLister) List(_ context.Context, req listRequest) (string, error) {
