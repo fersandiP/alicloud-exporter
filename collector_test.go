@@ -246,3 +246,59 @@ func TestPollOnceAdvancesSuccessOnCleanCycle(t *testing.T) {
 		t.Errorf("last_poll_success_timestamp_seconds = %v, want > 0 (clean cycle)", got)
 	}
 }
+
+func TestRRSACredentialAbsentFallsBackToChain(t *testing.T) {
+	for _, k := range []string{envRoleARN, envOIDCProvider, envOIDCTokenFil} {
+		t.Setenv(k, "")
+	}
+	cred, err := rrsaCredential()
+	if err != nil {
+		t.Fatalf("no RRSA env should not error: %v", err)
+	}
+	if cred != nil {
+		t.Errorf("cred = %v, want nil so the SDK uses its default chain", cred)
+	}
+}
+
+func TestRRSACredentialPartialIsAnError(t *testing.T) {
+	// A partial set means injection was attempted and did not complete. Falling
+	// through would authenticate as the node, which is the failure this guards.
+	cases := map[string][]string{
+		"only role":      {envRoleARN},
+		"role and token": {envRoleARN, envOIDCTokenFil},
+		"only token":     {envOIDCTokenFil},
+	}
+	for name, set := range cases {
+		t.Run(name, func(t *testing.T) {
+			for _, k := range []string{envRoleARN, envOIDCProvider, envOIDCTokenFil} {
+				t.Setenv(k, "")
+			}
+			for _, k := range set {
+				t.Setenv(k, "value")
+			}
+			cred, err := rrsaCredential()
+			if err == nil {
+				t.Fatalf("cred = %v, want an error for a partial RRSA set", cred)
+			}
+			if !strings.Contains(err.Error(), "partially configured") {
+				t.Errorf("error = %q, want it to name the partial configuration", err)
+			}
+		})
+	}
+}
+
+func TestRRSACredentialSurfacesAssumeFailure(t *testing.T) {
+	// A token file that does not exist stands in for any broken trust: the point
+	// is that it errors here instead of silently using another provider.
+	t.Setenv(envRoleARN, "acs:ram::1:role/r")
+	t.Setenv(envOIDCProvider, "acs:ram::1:oidc-provider/p")
+	t.Setenv(envOIDCTokenFil, "/nonexistent/rrsa-token")
+
+	cred, err := rrsaCredential()
+	if err == nil {
+		t.Fatalf("cred = %v, want an error when the token cannot be read", cred)
+	}
+	if !strings.Contains(err.Error(), "acs:ram::1:role/r") {
+		t.Errorf("error = %q, want it to name the role it failed to assume", err)
+	}
+}
